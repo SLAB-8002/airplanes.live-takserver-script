@@ -8,76 +8,143 @@ import datetime
 import uuid
 import time
 import ssl
+import csv
+import os
 
+def load_known_craft(csv_path):
+    """
+    Load known craft CSV into a dict keyed by lowercase HEX.
+    Expected headers (case-insensitive): HEX, COT, ICON, CALLSIGN
+    Extra headers are ignored. Missing columns are treated as blank.
+    """
+    mapping = {}
+    if not csv_path:
+        return mapping
+    if not os.path.isfile(csv_path):
+        raise FileNotFoundError(f"known_craft CSV not found: {csv_path}")
 
-def json_to_cot(json_data, stale_secs):
-    root = ET.Element("event")
-    root.set("version", "2.0")
-    root.set("uid", str(uuid.uuid3(uuid.NAMESPACE_DNS,json_data.get("hex", ""))))
+    with open(csv_path, newline='', encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        # Normalize fieldnames to upper for case-insensitive access
+        fieldnames = [h.upper() for h in reader.fieldnames or []]
+        # Fallbacks if unexpected headers
+        def get(row, key):
+            # case-insensitive lookup
+            for k, v in row.items():
+                if k.upper() == key:
+                    return (v or "").strip()
+            return ""
+
+        for row in reader:
+            hex_code = get(row, "HEX").lower()
+            if not hex_code:
+                continue
+            mapping[hex_code] = {
+                "COT": get(row, "COT"),
+                "ICON": get(row, "ICON"),
+                "CALLSIGN": get(row, "CALLSIGN"),
+            }
+    return mapping
+
+def json_to_cot(json_data, stale_secs, known_map):
+    """
+    Convert one ADS-B JSON aircraft to CoT.
+    known_map: dict keyed by lowercase hex -> {"COT","ICON","CALLSIGN"} (all strings; may be empty)
+    """
+    # Prepare time info
     cot_time = datetime.datetime.now(datetime.timezone.utc)
     stale = cot_time + datetime.timedelta(seconds=stale_secs)
+
+    # Identify the aircraft
+    hex_code = (json_data.get("hex", "") or "").lower()
+
+    # Look up known craft overrides (if any)
+    known = known_map.get(hex_code, {}) if known_map else {}
+    known_cot = (known.get("COT") or "").strip()
+    known_icon = (known.get("ICON") or "").strip()
+    known_callsign = (known.get("CALLSIGN") or "").strip()
+
+    # Derive the default CoT type (only if we don't have a known COT)
+    ismil = json_data.get("dbFlags", 0) & 1
+    category = (json_data.get("category", "") or "").lower()
+
+    cot_type = None
+    if known_cot:
+        cot_type = known_cot
+    else:
+        # Original behavior: require a category to classify, otherwise skip
+        if not category:
+            return ""
+        cot_type = "a"
+        if ismil:
+            # Label all mil as friendly
+            cot_type += "-f"
+        else:
+            # Label all non-mil as neutral
+            cot_type += "-n"
+
+        # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
+        if category[0] == "c":
+            # C is for ground
+            cot_type += "-G"
+            if category == "c1" or category == "c2":
+                #  C1 Surface vehicle – emergency vehicle
+                #  C2 Surface vehicle – service vehicle
+                cot_type += "-E-V"
+                if not ismil:
+                    cot_type += "-C"
+                cot_type += "-U"
+        else:
+            cot_type += "-A"
+            if ismil:
+                cot_type += "-M"
+            else:
+                cot_type += "-C"
+
+            if category == "a7":
+                # helicopter
+                cot_type += "-H"
+            elif category[0] == "a":
+                # rest of the A should be set to fixed wing
+                cot_type += "-F"
+            elif category == "b6":
+                # Unmanned aerial vehicle
+                cot_type += "-F-q"
+            elif category == "b2":
+                # Lighter than air
+                cot_type += "-L"
+
+    # Build CoT XML
+    root = ET.Element("event")
+    root.set("version", "2.0")
+    root.set("uid", str(uuid.uuid3(uuid.NAMESPACE_DNS, json_data.get("hex", ""))))
     root.set("time", cot_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
     root.set("start", cot_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
     root.set("stale", stale.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
-
-    ismil = json_data.get("dbFlags", 0) & 1
-    category = json_data.get("category", "").lower()
-
-    if not category:
-        return ""
-
-    cot_type = "a"
-    if ismil:
-        # Label all mil as friendly
-        cot_type += "-f"
-    else:
-        # Label all non-mil as neutral
-        cot_type += "-n"
-
-    # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
-    if category[0] == "c":
-        # C is for ground
-        cot_type += "-G"
-        if category == "c1":
-            #  Surface vehicle – emergency vehicle
-            cot_type += "-U-i"
-        if category == "c2":
-            #  Surface vehicle – service vehicle
-            cot_type += "-E-V"
-            if not ismil:
-                cot_type += "-C"
-    else:
-        cot_type += "-A"
-        if ismil:
-            cot_type += "-M"
-        else:
-            cot_type += "-C"
-
-        if category == "a7":
-            # helicopter
-            cot_type += "-H"
-        elif category[0] == "a":
-            # rest of the A should be set to fixed wing
-            cot_type += "-F"
-        elif category == "b6":
-            # Unmanned aerial vehicle
-            cot_type += "-F-q"
-        elif category == "b2":
-            # Lighter than air
-            cot_type += "-L"
-
     root.set("type", cot_type)
     root.set("how", "m-g")
+    
     detail = ET.SubElement(root, "detail")
+
+    # contact/callsign logic: prefer CSV CALLSIGN if present, else fall back to flight
+    callsign_value = known_callsign if known_callsign else json_data.get("flight", "") or ""
+    callsign_value = callsign_value.strip()
     contact = ET.SubElement(detail, "contact")
-    contact.set("callsign", json_data.get("hex", "")+"_"+json_data.get("r", ""))
+    contact.set("callsign", callsign_value)
     contact.set("type", json_data.get("t", ""))
+
+    # If ICON present, add <usericon path="..."/>
+    if known_icon:
+        usericon = ET.SubElement(detail, "usericon")
+        usericon.set("iconsetpath", known_icon)
+
     remarks = ET.SubElement(detail, "remarks")
     remarks.set("source", "airplanes.live")
     tmp = ""
     for k, v in json_data.items():
         tmp = tmp + k + ":" + str(v) + ", "
     remarks.text = tmp
+    
     track = ET.SubElement(detail, "track")
     # Fetch the ground speed in knots from the JSON data
     gs_knots = json_data.get("gs", 0)
@@ -85,23 +152,26 @@ def json_to_cot(json_data, stale_secs):
     gs_mps = float(gs_knots) * 0.514444
     track.set("speed", str(gs_mps))
     track.set("course", str(json_data.get("track", "0")))
-    point = ET.SubElement(root, "point")
 
+    point = ET.SubElement(root, "point")
     point.set("lat", str(json_data.get("lat", "")))
     point.set("lon", str(json_data.get("lon", "")))
     
     # Fetch the barometric altitude in feet from the JSON data
     try:
         alt_baro_feet = float(json_data.get("alt_baro", 0))
-    except ValueError:
-        # might return "ground"
+    except (ValueError, TypeError):
+        # might return "ground" or be missing
         alt_baro_feet = 0.0
     
     # Standard sea level pressure in hPa
     standard_sea_level_pressure = 1013.25
     
     # Fetch nav_qnh if available
-    nav_qnh = float(json_data.get('nav_qnh', standard_sea_level_pressure))
+    try:
+        nav_qnh = float(json_data.get('nav_qnh', standard_sea_level_pressure))
+    except (ValueError, TypeError):
+        nav_qnh = standard_sea_level_pressure
     
     # Convert barometric altitude to pressure altitude
     pressure_altitude_feet = alt_baro_feet + 1000 * (standard_sea_level_pressure - nav_qnh) / 30
@@ -116,12 +186,10 @@ def json_to_cot(json_data, stale_secs):
     point.set("le", "9999999.0")
     return ET.tostring(root, encoding="utf-8").decode("utf-8")
 
-
 def fetch_json(_url):
     response = requests.get(_url)
     response.raise_for_status()
     return response.json()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -137,6 +205,8 @@ if __name__ == "__main__":
                         help='Radius in Nautical Miles')
     parser.add_argument('--rate', required=False, type=int, default=0,
                         help='Rate at which to poll the server in seconds. Setting to 0 will run once and exit')
+    parser.add_argument('--known-craft', required=False, default=None,
+                        help='Path to known_craft.csv with headers: HEX,COT,ICON,CALLSIGN')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--udp', required=False, action='store_true', default=False,
                         help='Send packets via UDP')
@@ -145,6 +215,12 @@ if __name__ == "__main__":
     group.add_argument('--cert', required=False,
                        help='Path to unencrypted User SSL Certificate')
     args = parser.parse_args()
+
+    # Load known craft map (optional)
+    try:
+        known_map = load_known_craft(args.known_craft) if args.known_craft else {}
+    except Exception as e:
+        raise SystemExit(f"Failed to load --known-craft CSV: {e}")
 
     url = "https://api.airplanes.live/v2/point/" + str(args.lat) + "/" + str(args.lon) + "/" + str(args.radius)
 
@@ -168,7 +244,7 @@ if __name__ == "__main__":
         json_data = fetch_json(url)
         if 'ac' in json_data:
             for aircraft in json_data['ac']:
-                cot_xml = json_to_cot(aircraft, stale_period)
+                cot_xml = json_to_cot(aircraft, stale_period, known_map)
                 if not cot_xml:
                     continue
                 # print(cot_xml)
