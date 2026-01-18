@@ -4,6 +4,7 @@ import requests
 import xml.etree.ElementTree as ET
 import argparse
 import socket
+import struct
 import datetime
 import uuid
 import time
@@ -45,6 +46,67 @@ def load_known_craft(csv_path):
                 "CALLSIGN": get(row, "CALLSIGN"),
             }
     return mapping
+
+def labelize_key(key: str) -> str:
+    """
+    Convert a JSON key into a human label.
+    - short keys => ALL CAPS (e.g., hex -> HEX, r -> R)
+    - longer keys => Title Case with spaces (e.g., alt_baro -> Alt Baro)
+    """
+    if not key:
+        return ""
+    k = str(key).strip()
+    if len(k) <= 3:
+        return k.upper()
+    return k.replace("_", " ").strip().title()
+
+TYPE_SOURCE_LABELS = {
+    "adsb_icao": "ADS-B (ICAO)",
+    "adsb_icao_nt": "ADS-B (ICAO, non-transponder)",
+    "adsr_icao": "ADS-R (ICAO)",
+    "tisb_icao": "TIS-B (ICAO)",
+    "adsc": "ADS-C",
+    "mlat": "MLAT",
+    "other": "Other",
+    "mode_s": "Mode S (no position)",
+    "adsb_other": "ADS-B (non-ICAO)",
+    "adsr_other": "ADS-R (non-ICAO)",
+    "tisb_other": "TIS-B (non-ICAO)",
+    "tisb_trackfile": "TIS-B (trackfile)",
+}
+
+def format_adsb_remarks(json_data: dict, known_callsign: str = "") -> str:
+    """
+    Build a human-readable multi-line remarks string with only:
+    Flight Callsign, Registration, Hex, Source, Type, Description, Squawk
+    """
+    # Callsign: prefer known_callsign if present, else 'flight'
+    callsign = (known_callsign or json_data.get("flight") or "").strip()
+
+    registration = (json_data.get("r") or "").strip()
+    hex_code = (json_data.get("hex") or "").strip().upper()
+    ac_type = (json_data.get("t") or "").strip()
+    desc = (json_data.get("desc") or "").strip()   # not always present
+    ownop = (json_data.get("ownOp") or "").strip()
+    src_code = (json_data.get("type") or "").strip()
+    src_label = TYPE_SOURCE_LABELS.get(src_code, src_code or "")
+
+    squawk = (json_data.get("squawk") or "").strip()
+
+    fields = [
+        ("Flight Callsign", callsign),
+        ("Registration", registration),
+        ("ICAO", hex_code),
+        ("Type", ac_type),
+        ("Description", desc),
+        ("Operator",ownop),
+        ("Source", src_label),
+        ("Squawk", squawk),
+    ]
+
+    # Only emit lines that have a value
+    lines = [f"{label}: {value}" for label, value in fields if value not in ("", None)]
+    return "\n".join(lines)
 
 def json_to_cot(json_data, stale_secs, known_map):
     """
@@ -140,10 +202,7 @@ def json_to_cot(json_data, stale_secs, known_map):
 
     remarks = ET.SubElement(detail, "remarks")
     remarks.set("source", "airplanes.live")
-    tmp = ""
-    for k, v in json_data.items():
-        tmp = tmp + k + ":" + str(v) + ", "
-    remarks.text = tmp
+    remarks.text = format_adsb_remarks(json_data, known_callsign=known_callsign)
     
     track = ET.SubElement(detail, "track")
     # Fetch the ground speed in knots from the JSON data
@@ -230,7 +289,16 @@ if __name__ == "__main__":
         stale_period = args.rate * 2.5
 
     if args.udp:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tmp.connect(("8.8.8.8", 80))
+        default_local_ip = tmp.getsockname()[0]
+        tmp.close()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.bind(("", 0))
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(default_local_ip))
+
+        # This makes Winsock pick an interface/route
+        s.connect((args.dest, args.port))
     elif args.tcp:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((args.dest, args.port))
@@ -249,7 +317,7 @@ if __name__ == "__main__":
                     continue
                 # print(cot_xml)
                 if args.udp:
-                    s.sendto(bytes(cot_xml, "utf-8"), (args.dest, args.port))
+                    s.send(cot_xml.encode("utf-8"))
                 else:
                     s.sendall(bytes(cot_xml, "utf-8"))
         if args.rate <= 0:
