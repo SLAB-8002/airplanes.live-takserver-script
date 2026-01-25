@@ -103,6 +103,7 @@ MIL_COT_RULES = [
     {"t": "P8",   "cot": "a-f-A-M-F-P"},
 
     # Rotary wing
+    {"t": "AS65",  "cot": "a-f-A-M-H-H"},
     {"t": "H47",  "cot": "a-f-A-M-H-C"},
     {"t": "H60",  "cot": "a-f-A-M-H-U"},
     {"t": "H64",  "cot": "a-f-A-M-H-A"},
