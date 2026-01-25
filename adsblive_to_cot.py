@@ -1,16 +1,43 @@
+#!/usr/bin/env python3
 # This was a ATAK community script developed by https://github.com/niccellular
 # Shout out WildFire and SLAB
+
 import requests
 import xml.etree.ElementTree as ET
 import argparse
 import socket
-import struct
 import datetime
 import uuid
 import time
 import ssl
 import csv
 import os
+import sys
+import yaml
+from pathlib import Path
+
+
+def deep_get(d, keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def load_yaml_config(path):
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    with p.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("config.yaml root must be a mapping/dict")
+    return data
+
 
 def load_known_craft(csv_path):
     """
@@ -24,13 +51,10 @@ def load_known_craft(csv_path):
     if not os.path.isfile(csv_path):
         raise FileNotFoundError(f"known_craft CSV not found: {csv_path}")
 
-    with open(csv_path, newline='', encoding="utf-8") as f:
+    with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        # Normalize fieldnames to upper for case-insensitive access
-        fieldnames = [h.upper() for h in reader.fieldnames or []]
-        # Fallbacks if unexpected headers
+
         def get(row, key):
-            # case-insensitive lookup
             for k, v in row.items():
                 if k.upper() == key:
                     return (v or "").strip()
@@ -47,18 +71,6 @@ def load_known_craft(csv_path):
             }
     return mapping
 
-def labelize_key(key: str) -> str:
-    """
-    Convert a JSON key into a human label.
-    - short keys => ALL CAPS (e.g., hex -> HEX, r -> R)
-    - longer keys => Title Case with spaces (e.g., alt_baro -> Alt Baro)
-    """
-    if not key:
-        return ""
-    k = str(key).strip()
-    if len(k) <= 3:
-        return k.upper()
-    return k.replace("_", " ").strip().title()
 
 TYPE_SOURCE_LABELS = {
     "adsb_icao": "ADS-B (ICAO)",
@@ -75,22 +87,20 @@ TYPE_SOURCE_LABELS = {
     "tisb_trackfile": "TIS-B (trackfile)",
 }
 
+
 def format_adsb_remarks(json_data: dict, known_callsign: str = "") -> str:
     """
     Build a human-readable multi-line remarks string with only:
     Flight Callsign, Registration, Hex, Source, Type, Description, Squawk
     """
-    # Callsign: prefer known_callsign if present, else 'flight'
     callsign = (known_callsign or json_data.get("flight") or "").strip()
-
     registration = (json_data.get("r") or "").strip()
     hex_code = (json_data.get("hex") or "").strip().upper()
     ac_type = (json_data.get("t") or "").strip()
-    desc = (json_data.get("desc") or "").strip()   # not always present
+    desc = (json_data.get("desc") or "").strip()
     ownop = (json_data.get("ownOp") or "").strip()
     src_code = (json_data.get("type") or "").strip()
     src_label = TYPE_SOURCE_LABELS.get(src_code, src_code or "")
-
     squawk = (json_data.get("squawk") or "").strip()
 
     fields = [
@@ -99,34 +109,29 @@ def format_adsb_remarks(json_data: dict, known_callsign: str = "") -> str:
         ("ICAO", hex_code),
         ("Type", ac_type),
         ("Description", desc),
-        ("Operator",ownop),
+        ("Operator", ownop),
         ("Source", src_label),
         ("Squawk", squawk),
     ]
-
-    # Only emit lines that have a value
     lines = [f"{label}: {value}" for label, value in fields if value not in ("", None)]
     return "\n".join(lines)
+
 
 def json_to_cot(json_data, stale_secs, known_map):
     """
     Convert one ADS-B JSON aircraft to CoT.
     known_map: dict keyed by lowercase hex -> {"COT","ICON","CALLSIGN"} (all strings; may be empty)
     """
-    # Prepare time info
     cot_time = datetime.datetime.now(datetime.timezone.utc)
     stale = cot_time + datetime.timedelta(seconds=stale_secs)
 
-    # Identify the aircraft
     hex_code = (json_data.get("hex", "") or "").lower()
 
-    # Look up known craft overrides (if any)
     known = known_map.get(hex_code, {}) if known_map else {}
     known_cot = (known.get("COT") or "").strip()
     known_icon = (known.get("ICON") or "").strip()
     known_callsign = (known.get("CALLSIGN") or "").strip()
 
-    # Derive the default CoT type (only if we don't have a known COT)
     ismil = json_data.get("dbFlags", 0) & 1
     category = (json_data.get("category", "") or "").lower()
 
@@ -139,19 +144,14 @@ def json_to_cot(json_data, stale_secs, known_map):
             return ""
         cot_type = "a"
         if ismil:
-            # Label all mil as friendly
             cot_type += "-f"
         else:
-            # Label all non-mil as neutral
             cot_type += "-n"
 
         # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
         if category[0] == "c":
-            # C is for ground
             cot_type += "-G"
             if category == "c1" or category == "c2":
-                #  C1 Surface vehicle – emergency vehicle
-                #  C2 Surface vehicle – service vehicle
                 cot_type += "-E-V"
                 if not ismil:
                     cot_type += "-C"
@@ -164,19 +164,14 @@ def json_to_cot(json_data, stale_secs, known_map):
                 cot_type += "-C"
 
             if category == "a7":
-                # helicopter
                 cot_type += "-H"
             elif category[0] == "a":
-                # rest of the A should be set to fixed wing
                 cot_type += "-F"
             elif category == "b6":
-                # Unmanned aerial vehicle
                 cot_type += "-F-q"
             elif category == "b2":
-                # Lighter than air
                 cot_type += "-L"
 
-    # Build CoT XML
     root = ET.Element("event")
     root.set("version", "2.0")
     root.set("uid", str(uuid.uuid3(uuid.NAMESPACE_DNS, json_data.get("hex", ""))))
@@ -185,17 +180,15 @@ def json_to_cot(json_data, stale_secs, known_map):
     root.set("stale", stale.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
     root.set("type", cot_type)
     root.set("how", "m-g")
-    
+
     detail = ET.SubElement(root, "detail")
 
-    # contact/callsign logic: prefer CSV CALLSIGN if present, else fall back to flight
     callsign_value = known_callsign if known_callsign else json_data.get("flight", "") or ""
     callsign_value = callsign_value.strip()
     contact = ET.SubElement(detail, "contact")
     contact.set("callsign", callsign_value)
     contact.set("type", json_data.get("t", ""))
 
-    # If ICON present, add <usericon path="..."/>
     if known_icon:
         usericon = ET.SubElement(detail, "usericon")
         usericon.set("iconsetpath", known_icon)
@@ -203,11 +196,9 @@ def json_to_cot(json_data, stale_secs, known_map):
     remarks = ET.SubElement(detail, "remarks")
     remarks.set("source", "airplanes.live")
     remarks.text = format_adsb_remarks(json_data, known_callsign=known_callsign)
-    
+
     track = ET.SubElement(detail, "track")
-    # Fetch the ground speed in knots from the JSON data
     gs_knots = json_data.get("gs", 0)
-    # Convert the ground speed to meters per second (1 knot = 0.514444 meters per second)
     gs_mps = float(gs_knots) * 0.514444
     track.set("speed", str(gs_mps))
     track.set("course", str(json_data.get("track", "0")))
@@ -215,65 +206,159 @@ def json_to_cot(json_data, stale_secs, known_map):
     point = ET.SubElement(root, "point")
     point.set("lat", str(json_data.get("lat", "")))
     point.set("lon", str(json_data.get("lon", "")))
-    
-    # Fetch the barometric altitude in feet from the JSON data
+
     try:
         alt_baro_feet = float(json_data.get("alt_baro", 0))
     except (ValueError, TypeError):
-        # might return "ground" or be missing
         alt_baro_feet = 0.0
-    
-    # Standard sea level pressure in hPa
+
     standard_sea_level_pressure = 1013.25
-    
-    # Fetch nav_qnh if available
     try:
-        nav_qnh = float(json_data.get('nav_qnh', standard_sea_level_pressure))
+        nav_qnh = float(json_data.get("nav_qnh", standard_sea_level_pressure))
     except (ValueError, TypeError):
         nav_qnh = standard_sea_level_pressure
-    
-    # Convert barometric altitude to pressure altitude
+
     pressure_altitude_feet = alt_baro_feet + 1000 * (standard_sea_level_pressure - nav_qnh) / 30
-    
-    # Convert pressure altitude from feet to meters
     pressure_altitude_meters = pressure_altitude_feet * 0.3048
-    
-    # Set the converted altitude to the 'hae' attribute
     point.set("hae", str(pressure_altitude_meters))
-    
+
     point.set("ce", "9999999.0")
     point.set("le", "9999999.0")
+
     return ET.tostring(root, encoding="utf-8").decode("utf-8")
 
+
 def fetch_json(_url):
-    response = requests.get(_url)
+    # Avoid hanging forever when running as a service
+    headers = {"User-Agent": "adsb-to-tak/1.0"}
+    response = requests.get(_url, headers=headers, timeout=10)
     response.raise_for_status()
     return response.json()
 
+
+def connect_socket(args):
+    """
+    Preserve original socket behavior:
+    - UDP: set IP_MULTICAST_IF based on default route IP; connect() so send() works
+    - TCP: plain TCP
+    - CERT: ssl.wrap_socket with certfile
+    """
+    if args.udp:
+        tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tmp.connect(("8.8.8.8", 80))
+        default_local_ip = tmp.getsockname()[0]
+        tmp.close()
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.bind(("", 0))
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(default_local_ip))
+
+        # This makes Winsock pick an interface/route (kept from original logic)
+        s.connect((args.dest, args.port))
+        return s
+
+    if args.tcp:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((args.dest, args.port))
+        return s
+
+    # Cert-wrapped TCP
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s = ssl.wrap_socket(sock, certfile=args.cert)
+    s.connect((args.dest, args.port))
+    return s
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-lat", type=float, required=True,
-                        help="Centerpoint Latitude")
-    parser.add_argument("-lon", type=float, required=True,
-                        help="Centerpoint Longitude")
-    parser.add_argument('--dest', required=True,
-                        help='Destination Hostname or IP Address for Sending CoT')
-    parser.add_argument('--port', required=True, type=int,
-                        help='Destination Port')
-    parser.add_argument('--radius', required=False, type=int, default=25,
-                        help='Radius in Nautical Miles')
-    parser.add_argument('--rate', required=False, type=int, default=0,
-                        help='Rate at which to poll the server in seconds. Setting to 0 will run once and exit')
-    parser.add_argument('--known-craft', required=False, default=None,
-                        help='Path to known_craft.csv with headers: HEX,COT,ICON,CALLSIGN')
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--udp', required=False, action='store_true', default=False,
-                        help='Send packets via UDP')
-    group.add_argument('--tcp', required=False, action='store_true', default=False,
-                        help='Send packets via TCP')
-    group.add_argument('--cert', required=False,
-                       help='Path to unencrypted User SSL Certificate')
+
+    # Optional config.yaml for defaults (keeps existing CLI logic intact)
+    parser.add_argument(
+        "--config",
+        required=False,
+        default=None,
+        help="Path to config.yaml (optional). Values act as defaults for CLI args.",
+    )
+
+    # Keep flags/names the same to preserve existing usage
+    parser.add_argument("-lat", type=float, required=False, help="Centerpoint Latitude")
+    parser.add_argument("-lon", type=float, required=False, help="Centerpoint Longitude")
+    parser.add_argument("--dest", required=False, help="Destination Hostname or IP Address for Sending CoT")
+    parser.add_argument("--port", required=False, type=int, help="Destination Port")
+    parser.add_argument("--radius", required=False, type=int, default=25, help="Radius in Nautical Miles")
+    parser.add_argument(
+        "--rate",
+        required=False,
+        type=int,
+        default=0,
+        help="Rate at which to poll the server in seconds. Setting to 0 will run once and exit",
+    )
+    parser.add_argument(
+        "--known-craft",
+        required=False,
+        default=None,
+        help="Path to known_craft.csv with headers: HEX,COT,ICON,CALLSIGN",
+    )
+
+    # Transport: keep original mutually-exclusive options, but make it not-required so config.yaml can supply it.
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument("--udp", required=False, action="store_true", default=False, help="Send packets via UDP")
+    group.add_argument("--tcp", required=False, action="store_true", default=False, help="Send packets via TCP")
+    group.add_argument("--cert", required=False, help="Path to unencrypted User SSL Certificate")
+
     args = parser.parse_args()
+
+    # Load config.yaml if provided
+    cfg = {}
+    if args.config:
+        try:
+            cfg = load_yaml_config(args.config)
+        except Exception as e:
+            raise SystemExit(f"Failed to load --config YAML: {e}")
+
+    # Apply config values only if CLI didn't supply them (or left them at default)
+    def apply_cfg(attr, keys, *, when):
+        cur = getattr(args, attr)
+        if when(cur):
+            v = deep_get(cfg, keys, None)
+            if v is not None:
+                setattr(args, attr, v)
+
+    apply_cfg("lat", ["filter", "lat"], when=lambda v: v is None)
+    apply_cfg("lon", ["filter", "lon"], when=lambda v: v is None)
+    apply_cfg("dest", ["tak", "host"], when=lambda v: not v)
+    apply_cfg("port", ["tak", "port"], when=lambda v: v is None)
+    apply_cfg("radius", ["filter", "radius_nm"], when=lambda v: v == 25)
+    apply_cfg("rate", ["poll", "rate_sec"], when=lambda v: v == 0)
+    apply_cfg("known_craft", ["known_craft", "path"], when=lambda v: v is None)
+
+    # Transport selection from config if none provided on CLI
+    if not (args.udp or args.tcp or args.cert):
+        mode = (deep_get(cfg, ["tak", "mode"], "") or "").strip().lower()
+        if mode == "udp":
+            args.udp = True
+        elif mode == "tcp":
+            args.tcp = True
+        elif mode == "cert":
+            cert_path = deep_get(cfg, ["tak", "cert"], None)
+            if cert_path:
+                args.cert = cert_path
+
+    # Enforce original "required" semantics after config merge
+    missing = []
+    if args.lat is None:
+        missing.append("lat")
+    if args.lon is None:
+        missing.append("lon")
+    if not args.dest:
+        missing.append("dest")
+    if args.port is None:
+        missing.append("port")
+    if missing:
+        raise SystemExit("Missing required settings: " + ", ".join(missing) + " (provide via CLI or --config)")
+
+    if not (args.udp or args.tcp or args.cert):
+        raise SystemExit("Missing transport: choose one of --udp/--tcp/--cert (or set tak.mode in --config)")
 
     # Load known craft map (optional)
     try:
@@ -281,46 +366,48 @@ if __name__ == "__main__":
     except Exception as e:
         raise SystemExit(f"Failed to load --known-craft CSV: {e}")
 
+    # KEEP existing URL logic (hardcoded format)
     url = "https://api.airplanes.live/v2/point/" + str(args.lat) + "/" + str(args.lon) + "/" + str(args.radius)
 
+    # KEEP existing stale logic
     if args.rate <= 0:
         stale_period = 60
     else:
         stale_period = args.rate * 2.5
 
-    if args.udp:
-        tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        tmp.connect(("8.8.8.8", 80))
-        default_local_ip = tmp.getsockname()[0]
-        tmp.close()
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        s.bind(("", 0))
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(default_local_ip))
+    # Connect initial socket
+    s = connect_socket(args)
 
-        # This makes Winsock pick an interface/route
-        s.connect((args.dest, args.port))
-    elif args.tcp:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((args.dest, args.port))
-    else:
-        # Cert
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s = ssl.wrap_socket(sock, certfile=args.cert)
-        s.connect((args.dest, args.port))
-
+    # Main loop (minimal robustness: reconnect on errors)
     while True:
-        json_data = fetch_json(url)
-        if 'ac' in json_data:
-            for aircraft in json_data['ac']:
-                cot_xml = json_to_cot(aircraft, stale_period, known_map)
-                if not cot_xml:
-                    continue
-                # print(cot_xml)
-                if args.udp:
-                    s.send(cot_xml.encode("utf-8"))
-                else:
-                    s.sendall(bytes(cot_xml, "utf-8"))
+        try:
+            json_data = fetch_json(url)
+            if "ac" in json_data:
+                for aircraft in json_data["ac"]:
+                    cot_xml = json_to_cot(aircraft, stale_period, known_map)
+                    if not cot_xml:
+                        continue
+                    if args.udp:
+                        s.send(cot_xml.encode("utf-8"))
+                    else:
+                        s.sendall(cot_xml.encode("utf-8"))
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            try:
+                s.close()
+            except Exception:
+                pass
+            time.sleep(2)
+            try:
+                s = connect_socket(args)
+            except Exception as e2:
+                print(f"[ERROR] reconnect failed: {e2}", file=sys.stderr)
+                time.sleep(5)
+
         if args.rate <= 0:
             break
         else:
             time.sleep(args.rate)
+
