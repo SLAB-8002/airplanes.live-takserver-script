@@ -13,6 +13,7 @@ import ssl
 import csv
 import os
 import sys
+import unicodedata
 import yaml
 from pathlib import Path
 
@@ -91,52 +92,82 @@ TYPE_SOURCE_LABELS = {
 #
 # Rules are evaluated in order; first match wins.
 MIL_COT_RULES = [
-    # Fixed wing
     {"t": "C30J", "desc_has": ["KC-130"], "cot": "a-f-A-M-F-C"},
     {"t": "C30J", "desc_has": ["MC-130"], "cot": "a-f-A-M-F-M"},
-    {"t": "C30J", "desc_has": ["HC-130"],  "cot": "a-f-A-M-F-H"},
+    {"t": "C30J", "desc_has": ["HC-130"], "cot": "a-f-A-M-F-H"},
     {"t": "K35R", "cot": "a-f-A-M-F-K"},
     {"t": "C5M",  "cot": "a-f-A-M-F-C-H"},
     {"t": "C17",  "cot": "a-f-A-M-F-C"},
     {"t": "C27J", "cot": "a-f-A-M-F-C"},
     {"t": "C30J", "cot": "a-f-A-M-F-C"},
     {"t": "P8",   "cot": "a-f-A-M-F-P"},
-
-    # Rotary wing
-    {"t": "AS65",  "cot": "a-f-A-M-H-H"},
+    {"t": "AS65", "cot": "a-f-A-M-H-H"},
     {"t": "H47",  "cot": "a-f-A-M-H-C"},
     {"t": "H60",  "cot": "a-f-A-M-H-U"},
     {"t": "H64",  "cot": "a-f-A-M-H-A"},
 ]
 
-def _norm(s: str) -> str:
-    return (s or "").strip().upper()
+_DASHES = {
+    "\u2010",  # hyphen
+    "\u2011",  # non-breaking hyphen
+    "\u2012",  # figure dash
+    "\u2013",  # en dash
+    "\u2014",  # em dash
+    "\u2212",  # minus sign
+}
+
+def _clean_text(s: str) -> str:
+    """
+    Normalize text for matching:
+    - Unicode normalize
+    - Convert weird dashes to ASCII '-'
+    - Collapse whitespace
+    - casefold for robust case-insensitive compare
+    """
+    s = unicodedata.normalize("NFKC", (s or "").strip())
+    if any(d in s for d in _DASHES):
+        for d in _DASHES:
+            s = s.replace(d, "-")
+    s = " ".join(s.split())
+    return s.casefold()
+
+def _clean_upper(s: str) -> str:
+    s = unicodedata.normalize("NFKC", (s or "").strip())
+    if any(d in s for d in _DASHES):
+        for d in _DASHES:
+            s = s.replace(d, "-")
+    return s.upper()
 
 def mil_cot_from_rules(json_data: dict) -> str:
     """
-    Return a CoT type from ordered MIL rules, or "" if no match.
-
-    Future expansion: allow optional matches on desc/ownOp, e.g.
-      {"t":"C30J","desc_contains":"KC-130","cot":"..."}
+    First-match-wins against MIL_COT_RULES.
+    Supports:
+      - t exact match (case-insensitive)
+      - desc_has: all substrings must appear in desc
+      - ownop_has: all substrings must appear in ownOp
     """
-    t = _norm(json_data.get("t"))
-    desc = _norm(json_data.get("desc"))
-    ownop = _norm(json_data.get("ownOp"))
+    t = _clean_upper(json_data.get("t"))
+    desc = _clean_text(json_data.get("desc"))
+    ownop = _clean_text(json_data.get("ownOp"))
 
     for rule in MIL_COT_RULES:
-        if _norm(rule.get("t")) != t:
+        rt = _clean_upper(rule.get("t"))
+        if rt and rt != t:
             continue
 
-        # Optional future qualifiers (safe no-ops if not present)
-        desc_contains = _norm(rule.get("desc_contains"))
-        if desc_contains and desc_contains not in desc:
-            continue
-
-        ownop_contains = _norm(rule.get("ownop_contains"))
-        if ownop_contains and ownop_contains not in ownop:
-            continue
-
-        return rule.get("cot", "") or ""
+        # desc_has
+        for sub in (rule.get("desc_has") or []):
+            if _clean_text(sub) not in desc:
+                break
+        else:
+            # ownop_has
+            for sub in (rule.get("ownop_has") or rule.get("ownOp_has") or []):
+                if _clean_text(sub) not in ownop:
+                    break
+            else:
+                cot = (rule.get("cot") or "").strip()
+                if cot:
+                    return cot
 
     return ""
 
