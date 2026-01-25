@@ -92,17 +92,24 @@ TYPE_SOURCE_LABELS = {
 #
 # Rules are evaluated in order; first match wins.
 MIL_COT_RULES = [
+    {"t": "A400",  "cot": "a-f-A-M-F-C"},
+    {"t": "B762", "desc_has": ["KC-46"], "cot": "a-f-A-M-F-K"},
+    {"t": "C17",  "cot": "a-f-A-M-F-C"},
+    {"t": "C130", "cot": "a-f-A-M-F-C"},
+    {"t": "C27J", "cot": "a-f-A-M-F-C"},
     {"t": "C30J", "desc_has": ["KC-130"], "cot": "a-f-A-M-F-C"},
     {"t": "C30J", "desc_has": ["MC-130"], "cot": "a-f-A-M-F-M"},
     {"t": "C30J", "desc_has": ["HC-130"], "cot": "a-f-A-M-F-H"},
-    {"t": "K35R", "cot": "a-f-A-M-F-K"},
-    {"t": "C5M",  "cot": "a-f-A-M-F-C-H"},
-    {"t": "C17",  "cot": "a-f-A-M-F-C"},
-    {"t": "C27J", "cot": "a-f-A-M-F-C"},
     {"t": "C30J", "cot": "a-f-A-M-F-C"},
+    {"t": "C5M",  "cot": "a-f-A-M-F-C-H"},
+    {"t": "HAWK", "desc_has": ["T-45"], "cot": "a-f-A-M-F-T"},
+    {"t": "K35R", "cot": "a-f-A-M-F-K"},
+    {"t": "T38", "cot": "a-f-A-M-F-T"},
     {"t": "P8",   "cot": "a-f-A-M-F-P"},
     {"t": "AS65", "cot": "a-f-A-M-H-H"},
     {"t": "H47",  "cot": "a-f-A-M-H-C"},
+    {"t": "H60",  "desc_has": ["HH-60"], "cot": "a-f-A-M-H-H"},
+    {"t": "H60",  "desc_has": ["MH-60T"], "cot": "a-f-A-M-H-H"},
     {"t": "H60",  "cot": "a-f-A-M-H-U"},
     {"t": "H64",  "cot": "a-f-A-M-H-A"},
 ]
@@ -229,38 +236,47 @@ def json_to_cot(json_data, stale_secs, known_map):
 
         # Fallback to original category-based behavior if no MIL rule matched
         if not cot_type:
-            # Original behavior: require a category to classify, otherwise skip
+            # If no category, only skip if we also lack a usable position (common with Mode S only)
+            lat = json_data.get("lat", None)
+            lon = json_data.get("lon", None)
             if not category:
-                return ""
-            cot_type = "a"
-            if ismil:
-                cot_type += "-f"
+                if lat is None or lon is None or lat == "" or lon == "":
+                    return ""
+            
+            # If category is missing but we have a position, use a fallback CoT type.
+            # This primarily helps MLAT tracks which often omit category/type metadata.
+            if not category:
+                cot_type = "a-f-A-M-F" if ismil else "a-n-A-C-F"
             else:
-                cot_type += "-n"
-
-            # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
-            if category[0] == "c":
-                cot_type += "-G"
-                if category == "c1" or category == "c2":
-                    cot_type += "-E-V"
-                    if not ismil:
-                        cot_type += "-C"
-                    cot_type += "-U"
-            else:
-                cot_type += "-A"
+                cot_type = "a"
                 if ismil:
-                    cot_type += "-M"
+                    cot_type += "-f"
                 else:
-                    cot_type += "-C"
-
-                if category == "a7":
-                    cot_type += "-H"
-                elif category[0] == "a":
-                    cot_type += "-F"
-                elif category == "b6":
-                    cot_type += "-F-q"
-                elif category == "b2":
-                    cot_type += "-L"
+                    cot_type += "-n"
+    
+                # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
+                if category[0] == "c":
+                    cot_type += "-G"
+                    if category == "c1" or category == "c2":
+                        cot_type += "-E-V"
+                        if not ismil:
+                            cot_type += "-C"
+                        cot_type += "-U"
+                else:
+                    cot_type += "-A"
+                    if ismil:
+                        cot_type += "-M"
+                    else:
+                        cot_type += "-C"
+    
+                    if category == "a7":
+                        cot_type += "-H"
+                    elif category[0] == "a":
+                        cot_type += "-F"
+                    elif category == "b6":
+                        cot_type += "-F-q"
+                    elif category == "b2":
+                        cot_type += "-L"
 
     root = ET.Element("event")
     root.set("version", "2.0")
