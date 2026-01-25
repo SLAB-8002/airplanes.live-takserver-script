@@ -92,7 +92,10 @@ TYPE_SOURCE_LABELS = {
 #
 # Rules are evaluated in order; first match wins.
 MIL_COT_RULES = [
+    # Fixed wing
+    {"t": "A332",  "cot": "a-f-A-M-F-K"},
     {"t": "A400",  "cot": "a-f-A-M-F-C"},
+    {"t": "B742", "desc_has": ["E-4B"], "cot": "a-f-A-M-F-D"},
     {"t": "B762", "desc_has": ["KC-46"], "cot": "a-f-A-M-F-K"},
     {"t": "C17",  "cot": "a-f-A-M-F-C"},
     {"t": "C130", "cot": "a-f-A-M-F-C"},
@@ -102,16 +105,24 @@ MIL_COT_RULES = [
     {"t": "C30J", "desc_has": ["HC-130"], "cot": "a-f-A-M-F-H"},
     {"t": "C30J", "cot": "a-f-A-M-F-C"},
     {"t": "C5M",  "cot": "a-f-A-M-F-C-H"},
+    {"t": "E3TF", "cot": "a-f-A-M-F-R-W"},
+    {"t": "E6", "cot": "a-f-A-M-F-D"},
     {"t": "HAWK", "desc_has": ["T-45"], "cot": "a-f-A-M-F-T"},
     {"t": "K35R", "cot": "a-f-A-M-F-K"},
-    {"t": "T38", "cot": "a-f-A-M-F-T"},
+    {"t": "P3",   "cot": "a-f-A-M-F-P"},
     {"t": "P8",   "cot": "a-f-A-M-F-P"},
+    {"t": "T38", "cot": "a-f-A-M-F-T"},
+    {"t": "TEX2", "desc_has": ["T-6A"], "cot": "a-f-A-M-F-T"},
+
+    #Rotary wing
     {"t": "AS65", "cot": "a-f-A-M-H-H"},
+    {"t": "H47",  "cot": "a-f-A-M-H-C"},
     {"t": "H47",  "cot": "a-f-A-M-H-C"},
     {"t": "H60",  "desc_has": ["HH-60"], "cot": "a-f-A-M-H-H"},
     {"t": "H60",  "desc_has": ["MH-60T"], "cot": "a-f-A-M-H-H"},
     {"t": "H60",  "cot": "a-f-A-M-H-U"},
     {"t": "H64",  "cot": "a-f-A-M-H-A"},
+    {"t": "V22",  "cot": "a-f-A-M-H-C"},
 ]
 
 _DASHES = {
