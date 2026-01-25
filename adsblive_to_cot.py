@@ -16,7 +16,6 @@ import sys
 import yaml
 from pathlib import Path
 
-
 def deep_get(d, keys, default=None):
     cur = d
     for k in keys:
@@ -24,7 +23,6 @@ def deep_get(d, keys, default=None):
             return default
         cur = cur[k]
     return cur
-
 
 def load_yaml_config(path):
     if not path:
@@ -37,7 +35,6 @@ def load_yaml_config(path):
     if not isinstance(data, dict):
         raise ValueError("config.yaml root must be a mapping/dict")
     return data
-
 
 def load_known_craft(csv_path):
     """
@@ -71,7 +68,6 @@ def load_known_craft(csv_path):
             }
     return mapping
 
-
 TYPE_SOURCE_LABELS = {
     "adsb_icao": "ADS-B (ICAO)",
     "adsb_icao_nt": "ADS-B (ICAO, non-transponder)",
@@ -87,6 +83,61 @@ TYPE_SOURCE_LABELS = {
     "tisb_trackfile": "TIS-B (trackfile)",
 }
 
+# Ordered MIL aircraft CoT classification rules.
+# These ONLY apply when:
+#   - known_craft.csv does not provide COT, AND
+#   - the aircraft appears to be MIL (dbFlags bit 1), AND
+#   - a matching rule is found
+#
+# Rules are evaluated in order; first match wins.
+MIL_COT_RULES = [
+    # Fixed wing
+    {"t": "C30J", "desc_has": ["KC-130"], "cot": "a-f-A-M-F-C"},
+    {"t": "C30J", "desc_has": ["MC-130"], "cot": "a-f-A-M-F-M"},
+    {"t": "C30J", "desc_has": ["HC-130"],  "cot": "a-f-A-M-F-H"},
+    {"t": "K35R", "cot": "a-f-A-M-F-K"},
+    {"t": "C5M",  "cot": "a-f-A-M-F-C-H"},
+    {"t": "C17",  "cot": "a-f-A-M-F-C"},
+    {"t": "C27J", "cot": "a-f-A-M-F-C"},
+    {"t": "C30J", "cot": "a-f-A-M-F-C"},
+    {"t": "P8",   "cot": "a-f-A-M-F-P"},
+
+    # Rotary wing
+    {"t": "H47",  "cot": "a-f-A-M-H-C"},
+    {"t": "H60",  "cot": "a-f-A-M-H-U"},
+    {"t": "H64",  "cot": "a-f-A-M-H-A"},
+]
+
+def _norm(s: str) -> str:
+    return (s or "").strip().upper()
+
+def mil_cot_from_rules(json_data: dict) -> str:
+    """
+    Return a CoT type from ordered MIL rules, or "" if no match.
+
+    Future expansion: allow optional matches on desc/ownOp, e.g.
+      {"t":"C30J","desc_contains":"KC-130","cot":"..."}
+    """
+    t = _norm(json_data.get("t"))
+    desc = _norm(json_data.get("desc"))
+    ownop = _norm(json_data.get("ownOp"))
+
+    for rule in MIL_COT_RULES:
+        if _norm(rule.get("t")) != t:
+            continue
+
+        # Optional future qualifiers (safe no-ops if not present)
+        desc_contains = _norm(rule.get("desc_contains"))
+        if desc_contains and desc_contains not in desc:
+            continue
+
+        ownop_contains = _norm(rule.get("ownop_contains"))
+        if ownop_contains and ownop_contains not in ownop:
+            continue
+
+        return rule.get("cot", "") or ""
+
+    return ""
 
 def format_adsb_remarks(json_data: dict, known_callsign: str = "") -> str:
     """
@@ -116,7 +167,6 @@ def format_adsb_remarks(json_data: dict, known_callsign: str = "") -> str:
     lines = [f"{label}: {value}" for label, value in fields if value not in ("", None)]
     return "\n".join(lines)
 
-
 def json_to_cot(json_data, stale_secs, known_map):
     """
     Convert one ADS-B JSON aircraft to CoT.
@@ -139,38 +189,46 @@ def json_to_cot(json_data, stale_secs, known_map):
     if known_cot:
         cot_type = known_cot
     else:
-        # Original behavior: require a category to classify, otherwise skip
-        if not category:
-            return ""
-        cot_type = "a"
+        # NEW: ordered MIL rules (only for MIL, only if known_craft didn't override)
         if ismil:
-            cot_type += "-f"
-        else:
-            cot_type += "-n"
+            mil_rule_cot = mil_cot_from_rules(json_data)
+            if mil_rule_cot:
+                cot_type = mil_rule_cot
 
-        # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
-        if category[0] == "c":
-            cot_type += "-G"
-            if category == "c1" or category == "c2":
-                cot_type += "-E-V"
-                if not ismil:
-                    cot_type += "-C"
-                cot_type += "-U"
-        else:
-            cot_type += "-A"
+        # Fallback to original category-based behavior if no MIL rule matched
+        if not cot_type:
+            # Original behavior: require a category to classify, otherwise skip
+            if not category:
+                return ""
+            cot_type = "a"
             if ismil:
-                cot_type += "-M"
+                cot_type += "-f"
             else:
-                cot_type += "-C"
+                cot_type += "-n"
 
-            if category == "a7":
-                cot_type += "-H"
-            elif category[0] == "a":
-                cot_type += "-F"
-            elif category == "b6":
-                cot_type += "-F-q"
-            elif category == "b2":
-                cot_type += "-L"
+            # https://www.adsbexchange.com/emitter-category-ads-b-do-260b-2-2-3-2-5-2/
+            if category[0] == "c":
+                cot_type += "-G"
+                if category == "c1" or category == "c2":
+                    cot_type += "-E-V"
+                    if not ismil:
+                        cot_type += "-C"
+                    cot_type += "-U"
+            else:
+                cot_type += "-A"
+                if ismil:
+                    cot_type += "-M"
+                else:
+                    cot_type += "-C"
+
+                if category == "a7":
+                    cot_type += "-H"
+                elif category[0] == "a":
+                    cot_type += "-F"
+                elif category == "b6":
+                    cot_type += "-F-q"
+                elif category == "b2":
+                    cot_type += "-L"
 
     root = ET.Element("event")
     root.set("version", "2.0")
@@ -235,7 +293,6 @@ def fetch_json(_url):
     response.raise_for_status()
     return response.json()
 
-
 def connect_socket(args):
     """
     Preserve original socket behavior:
@@ -267,7 +324,6 @@ def connect_socket(args):
     s = ssl.wrap_socket(sock, certfile=args.cert)
     s.connect((args.dest, args.port))
     return s
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -410,4 +466,3 @@ if __name__ == "__main__":
             break
         else:
             time.sleep(args.rate)
-
