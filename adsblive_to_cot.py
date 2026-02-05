@@ -135,6 +135,7 @@ MIL_COT_RULES = [
     {"t": "EC35", "cot": "a-f-A-M-H-T"},
     {"t": "EC45", "desc_has": ["UH-72"], "cot": "a-f-A-M-H-U-L"},
     {"t": "EC45", "cot": "a-f-A-M-H-T"},
+    {"t": "H47",  "desc_has": ["MH-47"], "cot": "a-f-A-M-H-M"},
     {"t": "H47",  "cot": "a-f-A-M-H-C-H"},
     {"t": "H53S",  "desc_has": ["MH-53"], "cot": "a-f-A-M-H-I"},
     {"t": "H53S",  "desc_has": ["CH-53"], "cot": "a-f-A-M-H-C-H"},
